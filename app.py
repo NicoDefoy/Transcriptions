@@ -1,73 +1,68 @@
-from flask import Flask, request, send_file, jsonify, render_template
-from pydub import AudioSegment
-import whisper
-from fpdf import FPDF
+from flask import Flask, render_template, request, jsonify
 import os
-import ssl
+import whisper
+from werkzeug.utils import secure_filename
+from pydub import AudioSegment
+from fpdf import FPDF
 
-# Désactiver la vérification SSL temporairement
-ssl._create_default_https_context = ssl._create_unverified_context
-
+# Initialiser l'application Flask
 app = Flask(__name__)
+app.config["UPLOAD_FOLDER"] = "uploads"
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# Fonction pour ajouter des points et des retours à la ligne pour la lisibilité
-def format_transcription(text):
-    sentences = text.split('.')
-    formatted_text = ""
-    for sentence in sentences:
-        sentence = sentence.strip().capitalize()
-        if sentence:
-            formatted_text += sentence + ".\n\n"
-    return formatted_text
+# Charger le modèle Whisper
+model = whisper.load_model("base")
 
-# Fonction pour créer un PDF en UTF-8
-def create_pdf(transcription, filename="transcription.pdf"):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, transcription.encode('latin-1', 'replace').decode('latin-1'))
-    pdf.output(filename)
-
+# Page d'accueil
 @app.route('/')
 def index():
     return render_template("index.html")
 
+# Route pour gérer la transcription
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
     if 'file' not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+        return jsonify({"error": "Aucun fichier fourni"}), 400
     
     file = request.files['file']
-    temp_filename = "temp_audio.wav"
+    if file.filename == '':
+        return jsonify({"error": "Nom de fichier vide"}), 400
     
-    # Convertir en .wav si nécessaire
-    if file.filename.endswith('.m4a'):
-        audio = AudioSegment.from_file(file)
-        audio.export(temp_filename, format="wav")
-    else:
-        file.save(temp_filename)
-    
-    try:
-        # Transcription avec Whisper
-        model = whisper.load_model("base")
-        result = model.transcribe(temp_filename)
-        transcription = result["text"]
-        
-        # Mise en forme de la transcription
-        formatted_transcription = format_transcription(transcription)
-        
-        # Création du PDF
-        pdf_filename = "transcription.pdf"
-        create_pdf(formatted_transcription, pdf_filename)
-        
-        # Supprimer le fichier temporaire
-        if os.path.exists(temp_filename):
-            os.remove(temp_filename)
-        
-        # Envoi du PDF
-        return send_file(pdf_filename, as_attachment=True)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    # Sécuriser le nom de fichier et enregistrer
+    filename = secure_filename(file.filename)
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    file.save(file_path)
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Convertir le fichier en .wav si nécessaire
+    if not file_path.endswith('.wav'):
+        audio = AudioSegment.from_file(file_path)
+        file_path_wav = os.path.splitext(file_path)[0] + ".wav"
+        audio.export(file_path_wav, format="wav")
+        os.remove(file_path)
+        file_path = file_path_wav
+
+    # Transcrire l'audio avec Whisper
+    result = model.transcribe(file_path)
+    transcription_text = result["text"]
+
+    # Créer un PDF de la transcription
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, transcription_text)
+    pdf_output_path = os.path.splitext(file_path)[0] + ".pdf"
+    pdf.output(pdf_output_path)
+
+    # Supprimer le fichier audio après la transcription
+    os.remove(file_path)
+
+    # Retourner la transcription et le lien de téléchargement du PDF
+    return jsonify({
+        "transcription": transcription_text,
+        "pdf_path": pdf_output_path
+    })
+
+# Exécuter l'application
+if __name__ == '__main__':
+    app.run(debug=True)
