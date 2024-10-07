@@ -1,0 +1,4 @@
+Flask
+whisper
+fpdf
+pydub
